@@ -3,6 +3,11 @@ variable "aws_region" {
   default     = "eu-central-1"
 }
 
+variable "aws_zones" {
+  type = "list"
+  description = "AWS AZs (Availability zones) where subnets should be created"
+}
+
 variable "cluster_name" {
   description = "Name of the AWS Kubernetes cluster - will be used to name all created resources"
 }
@@ -30,15 +35,6 @@ variable "master_instance_type" {
 variable "worker_instance_type" {
   description = "Type of instance for workers"
   default     = "t2.medium"
-}
-
-variable "master_subnet_id" {
-  description = "The subnet-id to be used for the master instance. Master can be only in single subnet. All subnets have to belong to the same VPC."
-}
-
-variable "worker_subnet_ids" {
-  description = "The subnet-ids to be used for the worker instances. Workers can be in multiple subnets. Worker subnets can contain also the master subnet. If you want to run workers in different subnet(s) than master you have to tag the subnets with kubernetes.io/cluster/{cluster_name}=shared.  All subnets have to belong to the same VPC."
-  type        = list(string)
 }
 
 variable "min_worker_count" {

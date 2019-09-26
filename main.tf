@@ -1,29 +1,39 @@
 #####
 # AWS Prodvider
 #####
-
 # Retrieve AWS credentials from env variables AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
 provider "aws" {
-  region = var.aws_region
+  region = "${var.aws_region}"
 }
 
 #####
 # Generate kubeadm token
 #####
-
 module "kubeadm-token" {
   source = "scholzj/kubeadm-token/random"
 }
 
 #####
-# IAM roles
+# Build AWS Infrastructure (DNS Zone/VPC/Subnets/Gateways)
 #####
 
+module "aws_infra" {
+  source = "github.com/shamusx/terraform-aws-vpc.git"
+  aws_region = var.aws_region
+  aws_zones = var.aws_zones
+  vpc_name = var.cluster_name
+  vpc_cidr = "10.0.0.0/16"
+  private_subnets = "true"
+  hosted_zone = var.hosted_zone
+## Tags
+  tags = var.tags
+}
+#####
+# IAM roles
+#####
 # Master
-
 data "template_file" "master_policy_json" {
   template = file("${path.module}/template/master-policy.json.tpl")
-
   vars = {}
 }
 
@@ -116,14 +126,8 @@ resource "aws_iam_instance_profile" "node_profile" {
 #####
 # Security Group
 #####
-
-# Find VPC details based on Master subnet
-data "aws_subnet" "cluster_subnet" {
-  id = var.master_subnet_id
-}
-
 resource "aws_security_group" "kubernetes" {
-  vpc_id = data.aws_subnet.cluster_subnet.vpc_id
+  vpc_id = module.aws_infra.vpc_id
   name   = var.cluster_name
 
   tags = merge(
@@ -152,14 +156,6 @@ resource "aws_security_group_rule" "allow_ssh_from_cidr" {
   from_port = 22
   to_port   = 22
   protocol  = "tcp"
-  # TF-UPGRADE-TODO: In Terraform v0.10 and earlier, it was sometimes necessary to
-  # force an interpolation expression to be interpreted as a list by wrapping it
-  # in an extra set of list brackets. That form was supported for compatibilty in
-  # v0.11, but is no longer supported in Terraform v0.12.
-  #
-  # If the expression in the following list itself returns a list, remove the
-  # brackets to avoid interpretation as a list of lists. If the expression
-  # returns a single list item then leave it as-is and remove this TODO comment.
   cidr_blocks       = [var.ssh_access_cidr[count.index]]
   security_group_id = aws_security_group.kubernetes.id
 }
@@ -181,14 +177,6 @@ resource "aws_security_group_rule" "allow_api_from_cidr" {
   from_port = 6443
   to_port   = 6443
   protocol  = "tcp"
-  # TF-UPGRADE-TODO: In Terraform v0.10 and earlier, it was sometimes necessary to
-  # force an interpolation expression to be interpreted as a list by wrapping it
-  # in an extra set of list brackets. That form was supported for compatibilty in
-  # v0.11, but is no longer supported in Terraform v0.12.
-  #
-  # If the expression in the following list itself returns a list, remove the
-  # brackets to avoid interpretation as a list of lists. If the expression
-  # returns a single list item then leave it as-is and remove this TODO comment.
   cidr_blocks       = [var.api_access_cidr[count.index]]
   security_group_id = aws_security_group.kubernetes.id
 }
@@ -196,7 +184,6 @@ resource "aws_security_group_rule" "allow_api_from_cidr" {
 ##########
 # Bootstraping scripts
 ##########
-
 data "template_file" "init_master" {
   template = file("${path.module}/scripts/init-aws-kubernetes-master.sh")
 
@@ -210,7 +197,7 @@ data "template_file" "init_master" {
     asg_name      = "${var.cluster_name}-nodes"
     asg_min_nodes = var.min_worker_count
     asg_max_nodes = var.max_worker_count
-    aws_subnets   = join(" ", concat(var.worker_subnet_ids, [var.master_subnet_id]))
+    aws_subnets   = join(" ", concat(module.aws_infra.private_subnet_ids, [module.aws_infra.subnet_ids[0]]))
   }
 }
 
@@ -264,7 +251,6 @@ data "template_cloudinit_config" "node_cloud_init" {
 ##########
 # Keypair
 ##########
-
 resource "aws_key_pair" "keypair" {
   key_name   = var.cluster_name
   public_key = file(var.ssh_public_key)
@@ -273,7 +259,6 @@ resource "aws_key_pair" "keypair" {
 #####
 # AMI image
 #####
-
 data "aws_ami" "centos7" {
   most_recent = true
   owners      = ["aws-marketplace"]
@@ -297,7 +282,6 @@ data "aws_ami" "centos7" {
 #####
 # Master - EC2 instance
 #####
-
 resource "aws_eip" "master" {
   vpc = true
 }
@@ -309,7 +293,7 @@ resource "aws_instance" "master" {
 
   key_name = aws_key_pair.keypair.key_name
 
-  subnet_id = var.master_subnet_id
+  subnet_id = module.aws_infra.subnet_ids[0]
 
   associate_public_ip_address = false
 
@@ -352,7 +336,6 @@ resource "aws_eip_association" "master_assoc" {
 #####
 # Nodes
 #####
-
 resource "aws_launch_configuration" "nodes" {
   name_prefix          = "${var.cluster_name}-nodes-"
   image_id             = data.aws_ami.centos7.id
@@ -381,7 +364,7 @@ resource "aws_launch_configuration" "nodes" {
 }
 
 resource "aws_autoscaling_group" "nodes" {
-  vpc_zone_identifier = var.worker_subnet_ids
+  vpc_zone_identifier = module.aws_infra.private_subnet_ids
 
   name                 = "${var.cluster_name}-nodes"
   max_size             = var.max_worker_count
@@ -412,16 +395,10 @@ resource "aws_autoscaling_group" "nodes" {
 # DNS record
 #####
 
-data "aws_route53_zone" "dns_zone" {
-  name         = "${var.hosted_zone}."
-  private_zone = var.hosted_zone_private
-}
-
 resource "aws_route53_record" "master" {
-  zone_id = data.aws_route53_zone.dns_zone.zone_id
+  zone_id = module.aws_infra.dns_zoneid
   name    = "${var.cluster_name}.${var.hosted_zone}"
   type    = "A"
   records = [aws_eip.master.public_ip]
   ttl     = 300
 }
-

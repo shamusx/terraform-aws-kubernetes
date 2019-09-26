@@ -27,3 +27,7 @@ output "kubeconfig_ip" {
   value       = "/home/centos/kubeconfig_ip"
 }
 
+output "Instruction" {
+  description = "How to use"
+  value       = "Install kubectl on laptop or docker container and scp kubeconfig_ip or kubeconfig_dns file to ~/.kube/config"
+}
